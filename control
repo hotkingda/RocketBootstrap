@@ -1,13 +1,13 @@
 Package: com.rpetrich.rocketbootstrap
 Depends: firmware (>= 13.0), firmware (<< 17.0), mobilesubstrate
 Name: RocketBootstrap
-Version: 1.0.10~beta5
+Version: 1.0.11
 Architecture: iphoneos-arm
 Description: Support library allowing tweaks to communicate with sandboxed processes
 Depiction: https://www.rpetrich.com/cydia/rocketbootstrap/beta/
 Homepage: https://www.rpetrich.com/cydia/rocketbootstrap/beta/
 Maintainer: BigBoss <bigboss@thebigboss.org>
-Author: Ryan Petrich <rpetrich+rocketbootstrap@gmail.com>
+Author: Martin Liu <martin@martinliu.com>
 Sponsor: thebigboss.org <http://thebigboss.org>
 Section: Tweaks
 dev: rpetrich
