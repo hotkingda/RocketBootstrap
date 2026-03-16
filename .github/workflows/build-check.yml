@@ -1,0 +1,51 @@
+name: Build Check
+
+on:
+  push:
+    branches: [ios15, master]
+  pull_request:
+    branches: [ios15, master]
+
+jobs:
+  syntax-check:
+    name: Syntax & Header Check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check Objective-C syntax
+        run: |
+          errors=0
+          for f in *.h *.c; do
+            [ -f "$f" ] || continue
+            if ! clang -fsyntax-only -x objective-c \
+              -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+              -target arm64-apple-ios13.0 \
+              -Idefaultheaders -include prefix.pch \
+              -Wno-everything \
+              "$f" 2>/dev/null; then
+              echo "::warning file=$f::Syntax check failed (non-blocking)"
+            fi
+          done
+
+      - name: Verify public headers exist
+        run: |
+          for h in rocketbootstrap.h rocketbootstrap_dynamic.h bootstrap.h; do
+            if [ ! -f "$h" ]; then
+              echo "::error::Missing public header: $h"
+              exit 1
+            fi
+          done
+          echo "All public headers present."
+
+      - name: Verify control file
+        run: |
+          for field in Package Version Architecture Name; do
+            if ! grep -q "^${field}:" control; then
+              echo "::error::Missing required field '$field' in control"
+              exit 1
+            fi
+          done
+          echo "Control file valid."

@@ -9,3 +9,8 @@ layout
 packages
 compile_commands.json
 .cache
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+*.profraw

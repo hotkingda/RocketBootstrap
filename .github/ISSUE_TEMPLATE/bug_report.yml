@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a crash, service lookup failure, or unexpected behavior
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please fill in as much detail as possible.
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS Version
+      placeholder: "e.g. 16.5"
+    validations:
+      required: true
+
+  - type: input
+    id: jailbreak
+    attributes:
+      label: Jailbreak Tool & Version
+      placeholder: "e.g. Dopamine 2.1.5"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device Model
+      placeholder: "e.g. iPhone 13 (arm64e)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package-scheme
+    attributes:
+      label: Package Scheme
+      options:
+        - rootless
+        - rootful
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      placeholder: Describe the issue
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened?
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Crash log / syslog output
+      render: text
