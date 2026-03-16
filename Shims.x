@@ -5,8 +5,10 @@
 #import <CaptainHook/CaptainHook.h>
 #import <libkern/OSAtomic.h>
 #import <substrate.h>
+#import <objc/runtime.h>
 
 static unfair_lock shim_lock;
+static IMP _original_sendPort_IMP = NULL;
 
 kern_return_t bootstrap_look_up3(mach_port_t bp, const name_t service_name, mach_port_t *sp, pid_t target_pid, const uuid_t instance_id, uint64_t flags) __attribute__((weak_import));
 static kern_return_t (*_bootstrap_look_up3)(mach_port_t bp, const name_t service_name, mach_port_t *sp, pid_t target_pid, const uuid_t instance_id, uint64_t flags);
@@ -113,6 +115,34 @@ static bool has_hooked_messaging_center;
 
 %end
 
+static mach_port_t _manual_sendPort_hook(id self, SEL _cmd)
+{
+	if (objc_getAssociatedObject(self, &has_hooked_messaging_center)) {
+		mach_port_t *_sendPort = CHIvarRef(self, _sendPort, mach_port_t);
+		NSLock **_lock = CHIvarRef(self, _lock, NSLock *);
+		if (_sendPort && _lock) {
+			[*_lock lock];
+			mach_port_t result = *_sendPort;
+			if (result == MACH_PORT_NULL) {
+				NSString **_centerName = CHIvarRef(self, _centerName, NSString *);
+				if (_centerName && *_centerName && [self respondsToSelector:@selector(_setupInvalidationSource)]) {
+					mach_port_t bootstrap = MACH_PORT_NULL;
+					task_get_bootstrap_port(mach_task_self(), &bootstrap);
+					rocketbootstrap_look_up(bootstrap, [*_centerName UTF8String], _sendPort);
+					[self _setupInvalidationSource];
+					result = *_sendPort;
+				}
+			}
+			[*_lock unlock];
+			return result;
+		}
+	}
+	if (_original_sendPort_IMP) {
+		return ((mach_port_t (*)(id, SEL))_original_sendPort_IMP)(self, _cmd);
+	}
+	return MACH_PORT_NULL;
+}
+
 void rocketbootstrap_distributedmessagingcenter_apply(CPDistributedMessagingCenter *messaging_center)
 {
 	if (rocketbootstrap_is_passthrough())
@@ -120,7 +150,15 @@ void rocketbootstrap_distributedmessagingcenter_apply(CPDistributedMessagingCent
 	unfair_lock_lock(&shim_lock);
 	if (!has_hooked_messaging_center) {
 		has_hooked_messaging_center = true;
+		Class cls = objc_getClass("CPDistributedMessagingCenter");
+		Method m = cls ? class_getInstanceMethod(cls, @selector(_sendPort)) : NULL;
+		IMP before = m ? method_getImplementation(m) : NULL;
 		%init(messaging_center);
+		IMP after = m ? method_getImplementation(m) : NULL;
+		if (m && before == after) {
+			_original_sendPort_IMP = before;
+			method_setImplementation(m, (IMP)_manual_sendPort_hook);
+		}
 	}
 	unfair_lock_unlock(&shim_lock);
 	objc_setAssociatedObject(messaging_center, &has_hooked_messaging_center, (id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN);

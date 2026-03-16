@@ -98,7 +98,19 @@ static kern_return_t rocketbootstrap_look_up_with_timeout(mach_port_t bp, const 
 			return 1;
 		}
 		kern_return_t result = bootstrap_look_up(bp, redirected_name, sp);
-		return result;
+		if (result == 0) {
+			return 0;
+		}
+		// Async bootstrap_register may still be in flight; retry after short delay
+		usleep(50000);
+		result = bootstrap_look_up(bp, redirected_name, sp);
+		if (result == 0) {
+			return 0;
+		}
+		// iOS 16+: mobilegestalt.xpc is guarded, name redirection is the only option
+		if (kCFCoreFoundationVersionNumber >= 1900.0) {
+			return result;
+		}
 	}
 	if (rocketbootstrap_is_passthrough() || isDaemon) {
 		if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_5_0) {
@@ -122,7 +134,7 @@ static kern_return_t rocketbootstrap_look_up_with_timeout(mach_port_t bp, const 
 			return 1;
 	}
 	// iOS 16+: mobilegestalt.xpc port is guarded, must use name redirection only
-	if (kCFCoreFoundationVersionNumber >= 1854.0) {
+	if (kCFCoreFoundationVersionNumber >= 1900.0) {
 		char redirected_name[BOOTSTRAP_MAX_NAME_LEN];
 		if (!fill_redirected_name(redirected_name, service_name)) {
 			return 1;
@@ -641,7 +653,7 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 #endif
 			}
 			void *_xpc_connection_mach_event = MSFindSymbol(libxpc, "__xpc_connection_mach_event");
-			if (!_xpc_connection_mach_event && kCFCoreFoundationVersionNumber < 1854.0)
+			if (!_xpc_connection_mach_event && kCFCoreFoundationVersionNumber < 1900.0)
 				_xpc_connection_mach_event = make_sym_callable(*((void **)make_sym_readable((void *)libxpc)) + 0x10530);
 			if (_xpc_connection_mach_event) {
 				MSHookFunction(_xpc_connection_mach_event, $_xpc_connection_mach_event, (void **)&__xpc_connection_mach_event);
