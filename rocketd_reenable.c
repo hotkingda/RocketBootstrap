@@ -1,6 +1,7 @@
 #import <unistd.h>
 #import <dlfcn.h>
 #import <stdio.h>
+#import <sys/stat.h>
 
 #ifdef __LP64__
 #if __has_include(<ptrauth.h>)
@@ -54,5 +55,8 @@ int main(int argc, char *argv[])
 	setgid(0);
 	seteuid(0);
 	setegid(0);
+	struct stat st;
+	if (stat("/var/jb", &st) == 0)
+		return execlp("launchctl", "launchctl", "load", "/var/jb/Library/LaunchDaemons/com.rpetrich.rocketbootstrapd.plist", NULL);
 	return execlp("launchctl", "launchctl", "load", "/Library/LaunchDaemons/com.rpetrich.rocketbootstrapd.plist", NULL);
 }

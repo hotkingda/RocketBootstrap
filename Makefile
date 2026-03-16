@@ -7,9 +7,9 @@ LIBRARY_NAME := librocketbootstrap
 librocketbootstrap_FILES += Tweak.x Shims.x
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
 librocketbootstrap_LDFLAGS += -install_name @rpath/librocketbootstrap.dylib
-librocketbootstrap_WEAK_LIBRARIES += libs/rootless/TweakInject.tbd
+librocketbootstrap_LDFLAGS += -weak_library $(THEOS_PROJECT_DIR)/libs/rootless/TweakInject.tbd
 else
-librocketbootstrap_WEAK_LIBRARIES += libs/TweakInject.tbd
+librocketbootstrap_LDFLAGS += -weak_library $(THEOS_PROJECT_DIR)/libs/TweakInject.tbd
 endif
 librocketbootstrap_LIBRARIES += substrate
 librocketbootstrap_FRAMEWORKS += Foundation

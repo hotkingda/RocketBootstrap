@@ -98,9 +98,7 @@ static kern_return_t rocketbootstrap_look_up_with_timeout(mach_port_t bp, const 
 			return 1;
 		}
 		kern_return_t result = bootstrap_look_up(bp, redirected_name, sp);
-		if (result == 0) {
-			return 0;
-		}
+		return result;
 	}
 	if (rocketbootstrap_is_passthrough() || isDaemon) {
 		if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_5_0) {
@@ -122,6 +120,14 @@ static kern_return_t rocketbootstrap_look_up_with_timeout(mach_port_t bp, const 
 			allowed = true;
 		if (!allowed)
 			return 1;
+	}
+	// iOS 16+: mobilegestalt.xpc port is guarded, must use name redirection only
+	if (kCFCoreFoundationVersionNumber >= 1854.0) {
+		char redirected_name[BOOTSTRAP_MAX_NAME_LEN];
+		if (!fill_redirected_name(redirected_name, service_name)) {
+			return 1;
+		}
+		return bootstrap_look_up(bp, redirected_name, sp);
 	}
 	// Ask our service running inside of the com.apple.mobilegestalt.xpc job
 	mach_port_t servicesPort = MACH_PORT_NULL;
@@ -532,8 +538,11 @@ static void observe_rocketd(void)
 #pragma clang diagnostic ignored "-Wavailability"
 #endif
 		pid_t pid;
-		char *const argv[] = { "/usr/libexec/_rocketd_reenable", NULL };
-		if (posix_spawn(&pid, "/usr/libexec/_rocketd_reenable", NULL, NULL, argv, NULL) == 0) {
+		const char *reenable_path = "/usr/libexec/_rocketd_reenable";
+		if (access(ROOTLESS_PREFIX "/usr/libexec/_rocketd_reenable", X_OK) == 0)
+			reenable_path = ROOTLESS_PREFIX "/usr/libexec/_rocketd_reenable";
+		char *const argv[] = { (char *)reenable_path, NULL };
+		if (posix_spawn(&pid, reenable_path, NULL, NULL, argv, NULL) == 0) {
 			waitpid(pid, NULL, 0);
 		}
 #if __clang__
@@ -611,7 +620,8 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 	// Attach rockets when in the com.apple.mobilegestalt.xpc job
 	// (can't check in using the launchd APIs because it hates more than one checkin; this will do)
 	const char *executablePath = RBSExecutablePath();
-	if (strcmp(executablePath, "/usr/libexec/MobileGestaltHelper") == 0) {
+	if (strcmp(executablePath, "/usr/libexec/MobileGestaltHelper") == 0 ||
+		strcmp(executablePath, ROOTLESS_PREFIX "/usr/libexec/MobileGestaltHelper") == 0) {
 		isDaemon = YES;
 // #ifdef DEBUG
 // 		NSLog(@"RocketBootstrap: Initializing %s using mach_msg_server", executablePath);
@@ -631,7 +641,7 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 #endif
 			}
 			void *_xpc_connection_mach_event = MSFindSymbol(libxpc, "__xpc_connection_mach_event");
-			if (!_xpc_connection_mach_event)
+			if (!_xpc_connection_mach_event && kCFCoreFoundationVersionNumber < 1854.0)
 				_xpc_connection_mach_event = make_sym_callable(*((void **)make_sym_readable((void *)libxpc)) + 0x10530);
 			if (_xpc_connection_mach_event) {
 				MSHookFunction(_xpc_connection_mach_event, $_xpc_connection_mach_event, (void **)&__xpc_connection_mach_event);
@@ -641,7 +651,8 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 #endif
 			}
 		}
-	} else if (strcmp(executablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") == 0) {
+	} else if (strcmp(executablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") == 0 ||
+		strcmp(executablePath, ROOTLESS_PREFIX "/System/Library/CoreServices/SpringBoard.app/SpringBoard") == 0) {
 #ifdef DEBUG
 		NSLog(@"RocketBootstrap: Initializing %s", executablePath);
 #endif

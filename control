@@ -1,5 +1,5 @@
 Package: com.rpetrich.rocketbootstrap
-Depends: firmware (>= 13.0), firmware (<< 16.0), mobilesubstrate
+Depends: firmware (>= 13.0), firmware (<< 17.0), mobilesubstrate
 Name: RocketBootstrap
 Version: 1.0.10~beta5
 Architecture: iphoneos-arm
