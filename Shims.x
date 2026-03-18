@@ -102,13 +102,13 @@ static bool has_hooked_messaging_center;
 
 - (void)runServerOnCurrentThreadProtectedByEntitlement:(id)entitlement
 {
-	%orig();
 	if (objc_getAssociatedObject(self, &has_hooked_messaging_center)) {
 		NSString **_centerName = CHIvarRef(self, _centerName, NSString *);
 		if (_centerName && *_centerName) {
 			rocketbootstrap_unlock([*_centerName UTF8String]);
 		}
 	}
+	%orig();
 }
 
 %end

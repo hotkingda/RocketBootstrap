@@ -101,13 +101,13 @@ static kern_return_t rocketbootstrap_look_up_with_timeout(mach_port_t bp, const 
 		if (result == 0) {
 			return 0;
 		}
-		// Async bootstrap_register may still be in flight; retry after short delay
-		usleep(50000);
-		result = bootstrap_look_up(bp, redirected_name, sp);
-		if (result == 0) {
-			return 0;
+		for (int retry = 0; retry < 4; retry++) {
+			usleep(100000);
+			result = bootstrap_look_up(bp, redirected_name, sp);
+			if (result == 0) {
+				return 0;
+			}
 		}
-		// iOS 16+: mobilegestalt.xpc is guarded, name redirection is the only option
 		if (kCFCoreFoundationVersionNumber >= 1900.0) {
 			return result;
 		}
@@ -139,7 +139,18 @@ static kern_return_t rocketbootstrap_look_up_with_timeout(mach_port_t bp, const 
 		if (!fill_redirected_name(redirected_name, service_name)) {
 			return 1;
 		}
-		return bootstrap_look_up(bp, redirected_name, sp);
+		kern_return_t result = bootstrap_look_up(bp, redirected_name, sp);
+		if (result == 0) {
+			return 0;
+		}
+		for (int retry = 0; retry < 3; retry++) {
+			usleep(100000);
+			result = bootstrap_look_up(bp, redirected_name, sp);
+			if (result == 0) {
+				return 0;
+			}
+		}
+		return result;
 	}
 	// Ask our service running inside of the com.apple.mobilegestalt.xpc job
 	mach_port_t servicesPort = MACH_PORT_NULL;
@@ -214,22 +225,47 @@ kern_return_t rocketbootstrap_look_up(mach_port_t bp, const name_t service_name,
 static NSMutableSet *allowedNames;
 static unfair_lock namesLock;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 static void daemon_restarted_callback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo)
 {
 	NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 	unfair_lock_lock(&namesLock);
 	NSSet *allNames = [allowedNames copy];
 	unfair_lock_unlock(&namesLock);
+	bool uses_redirection = rocketbootstrap_uses_name_redirection();
 	for (NSString *name in allNames) {
 		const char *service_name = [name UTF8String];
-		LMConnectionSendOneWay(&connection, 0, service_name, strlen(service_name));             
+		LMConnectionSendOneWay(&connection, 0, service_name, strlen(service_name));
+		if (uses_redirection) {
+			mach_port_t selfPort = mach_task_self();
+			mach_port_t bootstrap = MACH_PORT_NULL;
+			task_get_bootstrap_port(selfPort, &bootstrap);
+			mach_port_t servicePort;
+			kern_return_t err = bootstrap_look_up(bootstrap, service_name, &servicePort);
+			if (err == 0) {
+				char redirected_name[BOOTSTRAP_MAX_NAME_LEN];
+				if (fill_redirected_name(redirected_name, service_name)) {
+					err = bootstrap_register(bootstrap, redirected_name, servicePort);
+					if (err != 0)
+						mach_port_mod_refs(selfPort, servicePort, MACH_PORT_RIGHT_SEND, -1);
+				} else {
+					mach_port_mod_refs(selfPort, servicePort, MACH_PORT_RIGHT_SEND, -1);
+				}
+			}
+		}
 	}
 	[allNames release];
 	[pool drain];
 }
 
+#pragma GCC diagnostic pop
+
 kern_return_t rocketbootstrap_unlock(const name_t service_name)
 {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #ifdef DEBUG
 	NSLog(@"RocketBootstrap: rocketbootstrap_unlock(%s)", service_name);
 #endif
@@ -246,29 +282,41 @@ kern_return_t rocketbootstrap_unlock(const name_t service_name)
 		mach_port_t servicePort;
 		kern_return_t err = bootstrap_look_up(bootstrap, service_name, &servicePort);
 		if (err != 0) {
-			// If the current process is permitted to register for this port, assume it's about to
-			int sandbox_result = sandbox_check(getpid(), "mach-register", SANDBOX_FILTER_LOCAL_NAME | SANDBOX_CHECK_NO_REPORT, service_name);
-			if (sandbox_result) {
-				return sandbox_result;
+			// Try a few times synchronously before falling back to async
+			for (int retry = 0; retry < 5; retry++) {
+				usleep(50000);
+				err = bootstrap_look_up(bootstrap, service_name, &servicePort);
+				if (err == 0) break;
 			}
-			char *copied_service_name = strdup(service_name);
-			CFRunLoopRef runLoop = CFRunLoopGetCurrent();
-			CFRunLoopPerformBlock(runLoop, kCFRunLoopCommonModes, ^{
-				mach_port_t selfPort1 = mach_task_self();
-				mach_port_t bootstrap = MACH_PORT_NULL;
-				task_get_bootstrap_port(selfPort1, &bootstrap);
-				mach_port_t servicePort1;
-				kern_return_t err = bootstrap_look_up(bootstrap, copied_service_name, &servicePort1);
-				if (err == 0) {
-					char redirected_name[BOOTSTRAP_MAX_NAME_LEN];
-					fill_redirected_name(redirected_name, copied_service_name);
-					err = bootstrap_register(bootstrap, redirected_name, servicePort1);
-					if (err != 0)
-						mach_port_mod_refs(selfPort1, servicePort1, MACH_PORT_RIGHT_SEND, -1);
-				}
-				free(copied_service_name);
-			});
-			CFRunLoopWakeUp(runLoop);
+			if (err == 0) {
+				err = bootstrap_register(bootstrap, redirected_name, servicePort);
+				if (err != 0)
+					mach_port_mod_refs(selfPort, servicePort, MACH_PORT_RIGHT_SEND, -1);
+			} else {
+				char *copied_service_name = strdup(service_name);
+				CFRunLoopRef runLoop = CFRunLoopGetCurrent();
+				CFRunLoopPerformBlock(runLoop, kCFRunLoopCommonModes, ^{
+					mach_port_t selfPort1 = mach_task_self();
+					mach_port_t bootstrap1 = MACH_PORT_NULL;
+					task_get_bootstrap_port(selfPort1, &bootstrap1);
+					mach_port_t servicePort1;
+					kern_return_t err1 = KERN_FAILURE;
+					for (int retry = 0; retry < 10; retry++) {
+						err1 = bootstrap_look_up(bootstrap1, copied_service_name, &servicePort1);
+						if (err1 == 0) break;
+						usleep(100000);
+					}
+					if (err1 == 0) {
+						char redir_name[BOOTSTRAP_MAX_NAME_LEN];
+						fill_redirected_name(redir_name, copied_service_name);
+						err1 = bootstrap_register(bootstrap1, redir_name, servicePort1);
+						if (err1 != 0)
+							mach_port_mod_refs(selfPort1, servicePort1, MACH_PORT_RIGHT_SEND, -1);
+					}
+					free(copied_service_name);
+				});
+				CFRunLoopWakeUp(runLoop);
+			}
 			return 0;
 		} else {
 			err = bootstrap_register(bootstrap, redirected_name, servicePort);
@@ -298,15 +346,13 @@ kern_return_t rocketbootstrap_unlock(const name_t service_name)
 	if (containedName) {
 		return 0;
 	}
-	// Ask rocketd to unlock it for us
-	int sandbox_result = sandbox_check(getpid(), "mach-lookup", SANDBOX_FILTER_LOCAL_NAME | SANDBOX_CHECK_NO_REPORT, kRocketBootstrapUnlockService);
-	if (sandbox_result) {
-		return sandbox_result;
-	}
 	return LMConnectionSendOneWay(&connection, 0, service_name, strlen(service_name));
+#pragma GCC diagnostic pop
 }
 
+#pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
 kern_return_t rocketbootstrap_register(mach_port_t bp, const name_t service_name, mach_port_t sp)
 {
 	if (rocketbootstrap_uses_name_redirection()) {
@@ -321,7 +367,7 @@ kern_return_t rocketbootstrap_register(mach_port_t bp, const name_t service_name
 		return err;
 	return bootstrap_register(bp, service_name, sp);
 }
-#pragma GCC diagnostic warning "-Wdeprecated-declarations"
+#pragma GCC diagnostic pop
 
 static kern_return_t handle_bootstrap_lookup_msg(mach_msg_header_t *request)
 {
@@ -588,8 +634,13 @@ static void observe_rocketd(void)
 		}
 		mach_port_mod_refs(self, servicesPort, MACH_PORT_RIGHT_SEND, -1);
 	}
-	// Find it
-	pid_t pid = pid_of_process("rocketd");
+	// Find it, retrying briefly for process to appear after spawn
+	pid_t pid = 0;
+	for (int attempt = 0; attempt < 10; attempt++) {
+		pid = pid_of_process("rocketd");
+		if (pid) break;
+		usleep(100000);
+	}
 	if (pid) {
 #ifdef DEBUG
 		NSLog(@"RocketBootstrap: rocketd found: %d", pid);
@@ -600,7 +651,7 @@ static void observe_rocketd(void)
 		(void)kevent(daemon_die_queue, &changes, 1, &changes, 1, NULL);
 		daemon_die_fd = CFFileDescriptorCreate(NULL, daemon_die_queue, true, process_terminate_callback, NULL);
 		daemon_die_source = CFFileDescriptorCreateRunLoopSource(NULL, daemon_die_fd, 0);
-	    CFRunLoopAddSource(CFRunLoopGetCurrent(), daemon_die_source, kCFRunLoopDefaultMode);
+		CFRunLoopAddSource(CFRunLoopGetCurrent(), daemon_die_source, kCFRunLoopDefaultMode);
 		CFFileDescriptorEnableCallBacks(daemon_die_fd, kCFFileDescriptorReadCallBack);
 	} else {
 		NSLog(@"RocketBootstrap: unable to find rocketd!");
@@ -617,6 +668,8 @@ static void process_terminate_callback(CFFileDescriptorRef fd, CFOptionFlags cal
 	CFRelease(daemon_die_source);
 	CFRelease(daemon_die_fd);
 	close(daemon_die_queue);
+	// Delay relaunch to avoid rapid restart loops
+	usleep(500000);
 	observe_rocketd();
 }
 
@@ -635,10 +688,13 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 	if (strcmp(executablePath, "/usr/libexec/MobileGestaltHelper") == 0 ||
 		strcmp(executablePath, ROOTLESS_PREFIX "/usr/libexec/MobileGestaltHelper") == 0) {
 		isDaemon = YES;
-// #ifdef DEBUG
-// 		NSLog(@"RocketBootstrap: Initializing %s using mach_msg_server", executablePath);
-// #endif
-// 		MSHookFunction(mach_msg_server_once, $mach_msg_server_once, (void **)&_mach_msg_server_once);
+		// iOS 16+: mobilegestalt.xpc port is guarded, XPC bridge is unusable
+		if (kCFCoreFoundationVersionNumber >= 1900.0) {
+#ifdef DEBUG
+			NSLog(@"RocketBootstrap: Skipping MobileGestaltHelper XPC hooks on iOS 16+ (guarded port)");
+#endif
+			return;
+		}
 #ifdef DEBUG
 		NSLog(@"RocketBootstrap: Initializing %s using XPC", executablePath);
 #endif
@@ -653,7 +709,7 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 #endif
 			}
 			void *_xpc_connection_mach_event = MSFindSymbol(libxpc, "__xpc_connection_mach_event");
-			if (!_xpc_connection_mach_event && kCFCoreFoundationVersionNumber < 1900.0)
+			if (!_xpc_connection_mach_event)
 				_xpc_connection_mach_event = make_sym_callable(*((void **)make_sym_readable((void *)libxpc)) + 0x10530);
 			if (_xpc_connection_mach_event) {
 				MSHookFunction(_xpc_connection_mach_event, $_xpc_connection_mach_event, (void **)&__xpc_connection_mach_event);
@@ -669,32 +725,36 @@ static void SanityCheckNotificationCallback(CFUserNotificationRef userNotificati
 		NSLog(@"RocketBootstrap: Initializing %s", executablePath);
 #endif
 		if (kCFCoreFoundationVersionNumber < 847.20) return;
-		// Sanity check on the MobileGestaltHelper service
-		mach_port_t bootstrap = MACH_PORT_NULL;
-		mach_port_t self = mach_task_self();
-		task_get_bootstrap_port(self, &bootstrap);
-		mach_port_t servicesPort = MACH_PORT_NULL;
-		kern_return_t err = bootstrap_look_up(bootstrap, "com.apple.mobilegestalt.xpc", &servicesPort);
-		if (err == 0) {
-			mach_port_mod_refs(self, servicesPort, MACH_PORT_RIGHT_SEND, -1);
+		// iOS 16+: mobilegestalt.xpc is guarded, skip sanity check and go directly to rocketd
+		if (kCFCoreFoundationVersionNumber >= 1900.0) {
 			observe_rocketd();
 		} else {
-			const CFTypeRef keys[] = {
-				kCFUserNotificationAlertHeaderKey,
-				kCFUserNotificationAlertMessageKey,
-				kCFUserNotificationDefaultButtonTitleKey,
-			};
-			const CFTypeRef valuesList[] = {
-				CFSTR("System files missing!"),
-				CFSTR("RocketBootstrap has detected that your MobileGestaltHelper daemon is missing or disabled.\nThis daemon is required for proper operation of packages that depend on RocketBootstrap."),
-				CFSTR("OK"),
-			};
-			CFDictionaryRef dict = CFDictionaryCreate(kCFAllocatorDefault, (const void **)keys, (const void **)valuesList, sizeof(keys) / sizeof(*keys), &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-			SInt32 err = 0;
-			CFUserNotificationRef notification = CFUserNotificationCreate(kCFAllocatorDefault, 0.0, kCFUserNotificationPlainAlertLevel, &err, dict);
-			CFRunLoopSourceRef runLoopSource = CFUserNotificationCreateRunLoopSource(kCFAllocatorDefault, notification, SanityCheckNotificationCallback, 0);
-			CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, kCFRunLoopCommonModes);
-			CFRelease(dict);
+			mach_port_t bootstrap = MACH_PORT_NULL;
+			mach_port_t self = mach_task_self();
+			task_get_bootstrap_port(self, &bootstrap);
+			mach_port_t servicesPort = MACH_PORT_NULL;
+			kern_return_t err = bootstrap_look_up(bootstrap, "com.apple.mobilegestalt.xpc", &servicesPort);
+			if (err == 0) {
+				mach_port_mod_refs(self, servicesPort, MACH_PORT_RIGHT_SEND, -1);
+				observe_rocketd();
+			} else {
+				const CFTypeRef keys[] = {
+					kCFUserNotificationAlertHeaderKey,
+					kCFUserNotificationAlertMessageKey,
+					kCFUserNotificationDefaultButtonTitleKey,
+				};
+				const CFTypeRef valuesList[] = {
+					CFSTR("System files missing!"),
+					CFSTR("RocketBootstrap has detected that your MobileGestaltHelper daemon is missing or disabled.\nThis daemon is required for proper operation of packages that depend on RocketBootstrap."),
+					CFSTR("OK"),
+				};
+				CFDictionaryRef dict = CFDictionaryCreate(kCFAllocatorDefault, (const void **)keys, (const void **)valuesList, sizeof(keys) / sizeof(*keys), &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+				SInt32 err = 0;
+				CFUserNotificationRef notification = CFUserNotificationCreate(kCFAllocatorDefault, 0.0, kCFUserNotificationPlainAlertLevel, &err, dict);
+				CFRunLoopSourceRef runLoopSource = CFUserNotificationCreateRunLoopSource(kCFAllocatorDefault, notification, SanityCheckNotificationCallback, 0);
+				CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, kCFRunLoopCommonModes);
+				CFRelease(dict);
+			}
 		}
 	}
 }

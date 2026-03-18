@@ -22,7 +22,17 @@
 static int fix_setuid(void)
 {
 	void *libjailbreak = dlopen("/usr/lib/libjailbreak.dylib", RTLD_LAZY);
+	if (!libjailbreak)
+		libjailbreak = dlopen("/var/jb/usr/lib/libjailbreak.dylib", RTLD_LAZY);
 	if (libjailbreak) {
+		// Try Dopamine 2.x API first
+		int (*jbclient_process_checkin)(void *, void *, void *, void *, void *, void *) =
+			sign_function(dlsym(libjailbreak, "jbclient_process_checkin"));
+		if (jbclient_process_checkin) {
+			jbclient_process_checkin(NULL, NULL, NULL, NULL, NULL, NULL);
+			return 0;
+		}
+		// Fallback to Electra/unc0ver API
 		jb_connection_t (*jb_connect)(void) = sign_function(dlsym(libjailbreak, "jb_connect"));
 		int (*jb_fix_setuid_now)(jb_connection_t connection, pid_t pid) = sign_function(dlsym(libjailbreak, "jb_fix_setuid_now"));
 		void (*jb_disconnect)(jb_connection_t connection) = sign_function(dlsym(libjailbreak, "jb_disconnect"));
